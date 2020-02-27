@@ -8,9 +8,12 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 
 	"github.com/newrelic/newrelic-telemetry-sdk-go/telemetry"
 	"go.opentelemetry.io/otel/api/core"
+	export "go.opentelemetry.io/otel/sdk/export/metric"
+	"go.opentelemetry.io/otel/sdk/export/metric/aggregator"
 	"go.opentelemetry.io/otel/sdk/export/trace"
 )
 
@@ -59,8 +62,75 @@ var (
 	_ interface {
 		trace.SpanSyncer
 		trace.SpanBatcher
+		export.Exporter
 	} = &Exporter{}
 )
+
+// Export exports multiple OpenTelemetry Instrument measurements to New Relic.
+func (e *Exporter) Export(ctx context.Context, checkpoints export.CheckpointSet) error {
+	var processErr error
+
+	checkpoints.ForEach(func(record export.Record) {
+		desc := record.Descriptor()
+		agg := record.Aggregator()
+
+		switch t := agg.(type) {
+		case aggregator.Min:
+			fmt.Printf("got Min/%s\n", desc.MetricKind().String())
+			// TODO: summary?
+		case aggregator.Max:
+			fmt.Printf("got Max/%s\n", desc.MetricKind().String())
+			// TODO: summary?
+		case aggregator.Sum:
+			rawSum, err := t.Sum()
+			if err != nil {
+				processErr = err
+				return
+			}
+			e.harvester.MetricAggregator().Count(
+				desc.Name(),
+				map[string]interface{}{
+					"service.name": e.serviceName,
+					"description":  desc.Description(),
+					"unit":         string(desc.Unit()),
+				},
+			).Increase(rawSum.AsFloat64())
+		case aggregator.Count:
+			fmt.Printf("got Count/%s\n", desc.MetricKind().String())
+			// TODO: summary?
+		case aggregator.MinMaxSumCount:
+			fmt.Printf("got MinMaxSumCount/%s\n", desc.MetricKind().String())
+			// TODO: summary
+		case aggregator.LastValue:
+			rawValue, timestamp, err := t.LastValue()
+			if err != nil {
+				processErr = err
+				return
+			}
+			e.harvester.RecordMetric(telemetry.Gauge{
+				Timestamp: timestamp,
+				Value:     rawValue.AsFloat64(),
+				Name:      desc.Name(),
+				Attributes: map[string]interface{}{
+					"service.name": e.serviceName,
+					"description":  desc.Description(),
+					"unit":         string(desc.Unit()),
+				},
+			})
+		case aggregator.Quantile:
+			fmt.Printf("got Quantile/%s\n", desc.MetricKind().String())
+			// TODO: IDK?
+		case aggregator.Points:
+			fmt.Printf("got Points/%s\n", desc.MetricKind().String())
+			// TODO: summary?
+		default:
+			fmt.Printf("got %s\n", desc.MetricKind().String())
+			// TODO: return "unimplemented" error.
+		}
+	})
+
+	return processErr
+}
 
 // ExportSpans exports multiple spans to New Relic.
 func (e *Exporter) ExportSpans(ctx context.Context, spans []*trace.SpanData) {
